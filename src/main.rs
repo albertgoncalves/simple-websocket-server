@@ -17,7 +17,7 @@ use std::thread;
 enum Comm {
     Connect(Arc<TcpStream>),
     Handshake(Arc<TcpStream>, String),
-    Drop(Arc<TcpStream>),
+    Close(Arc<TcpStream>),
     Broadcast(SocketAddr, String),
 }
 
@@ -102,7 +102,7 @@ fn server(receiver: Receiver<Comm>) {
                 .unwrap();
                 stream.as_ref().flush().unwrap();
             }
-            Comm::Drop(stream) => {
+            Comm::Close(stream) => {
                 stream.shutdown(Shutdown::Both).unwrap();
                 clients.remove(&stream.peer_addr().unwrap().ip());
             }
