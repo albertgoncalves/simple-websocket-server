@@ -59,8 +59,8 @@ fn client(stream: Arc<TcpStream>, sender: Sender<Comm>) {
             headers.insert(key, value);
         }
 
-        assert_eq!(headers.get("Connection").unwrap(), "Upgrade");
-        assert_eq!(headers.get("Upgrade").unwrap(), "websocket");
+        assert_eq!(headers.get("Connection").unwrap().to_lowercase(), "upgrade");
+        assert_eq!(headers.get("Upgrade").unwrap().to_lowercase(), "websocket");
         assert_eq!(headers.get("Sec-WebSocket-Version").unwrap(), "13");
 
         handshake(headers.get("Sec-WebSocket-Key").unwrap().to_owned())
