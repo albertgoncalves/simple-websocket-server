@@ -5,10 +5,10 @@ mod handshake;
 mod packet;
 
 use handshake::handshake;
-use packet::read_packet;
+use packet::{serialize, Opcode, Packet};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -17,11 +17,11 @@ use std::thread;
 enum Comm {
     Connect(Arc<TcpStream>),
     Handshake(Arc<TcpStream>, String),
-    Close(Arc<TcpStream>),
-    Broadcast(SocketAddr, String),
+    Close(Arc<TcpStream>, u16, Option<String>),
+    Echo(Arc<TcpStream>, String),
 }
 
-fn client(stream: Arc<TcpStream>, sender: Sender<Comm>) {
+fn client(stream: &Arc<TcpStream>, sender: &Sender<Comm>) {
     println!("{stream:?}");
     sender.send(Comm::Connect(stream.clone())).unwrap();
 
@@ -59,24 +59,29 @@ fn client(stream: Arc<TcpStream>, sender: Sender<Comm>) {
             headers.insert(key, value);
         }
 
-        assert_eq!(headers.get("Connection").unwrap().to_lowercase(), "upgrade");
-        assert_eq!(headers.get("Upgrade").unwrap().to_lowercase(), "websocket");
-        assert_eq!(headers.get("Sec-WebSocket-Version").unwrap(), "13");
+        assert_eq!(headers["Connection"].to_lowercase(), "upgrade");
+        assert_eq!(headers["Upgrade"].to_lowercase(), "websocket");
+        assert_eq!(headers["Sec-WebSocket-Version"], "13");
 
-        handshake(headers.get("Sec-WebSocket-Key").unwrap().to_owned())
+        handshake(headers["Sec-WebSocket-Key"].clone())
     };
 
     sender
         .send(Comm::Handshake(stream.clone(), accept))
         .unwrap();
 
-    loop {
-        let packet = read_packet(&mut reader).unwrap();
+    while let Ok(packet) = packet::read(&mut reader) {
         println!("{packet:?}");
+        match packet {
+            Packet::Text(text) => sender.send(Comm::Echo(stream.clone(), text)).unwrap(),
+            Packet::Close(status_code, text) => sender
+                .send(Comm::Close(stream.clone(), status_code, text))
+                .unwrap(),
+        }
     }
 }
 
-fn server(receiver: Receiver<Comm>) {
+fn server(receiver: &Receiver<Comm>) {
     let mut clients = HashMap::new();
     loop {
         let comm = receiver.recv().unwrap();
@@ -102,11 +107,35 @@ fn server(receiver: Receiver<Comm>) {
                 .unwrap();
                 stream.as_ref().flush().unwrap();
             }
-            Comm::Close(stream) => {
+            Comm::Close(stream, status_code, text) => {
+                let buffer = text.map_or_else(
+                    || {
+                        let mut buffer = Vec::with_capacity(2);
+                        buffer.extend_from_slice(&status_code.to_be_bytes());
+                        buffer
+                    },
+                    |text| {
+                        let mut buffer = Vec::with_capacity(2 + text.len());
+                        buffer.extend_from_slice(&status_code.to_be_bytes());
+                        buffer.extend_from_slice(text.as_bytes());
+                        buffer
+                    },
+                );
+                stream
+                    .as_ref()
+                    .write_all(&serialize(Opcode::Close, None, &buffer))
+                    .unwrap();
+                stream.as_ref().flush().unwrap();
                 stream.shutdown(Shutdown::Both).unwrap();
                 clients.remove(&stream.peer_addr().unwrap().ip());
             }
-            Comm::Broadcast(_from, _sender) => todo!(),
+            Comm::Echo(stream, text) => {
+                stream
+                    .as_ref()
+                    .write_all(&serialize(Opcode::Text, None, text.as_bytes()))
+                    .unwrap();
+                stream.as_ref().flush().unwrap();
+            }
         }
     }
 }
@@ -115,13 +144,12 @@ fn main() {
     let listener = TcpListener::bind("127.0.0.1:7878").unwrap();
     let (sender, receiver) = channel();
     thread::spawn(move || {
-        server(receiver);
+        server(&receiver);
     });
     for stream in listener.incoming() {
-        let stream = Arc::new(stream.unwrap());
         let sender = sender.clone();
         thread::spawn(move || {
-            client(stream, sender);
+            client(&Arc::new(stream.unwrap()), &sender);
         });
     }
 }
